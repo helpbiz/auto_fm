@@ -236,6 +236,14 @@ def _force_editable_full(table: QTableWidget, tag: str = "force") -> None:
 
 
 class JobRoleTableWidget(QTableWidget):
+    def closeEditor(self, editor, hint) -> None:
+        if editor is not None:
+            try:
+                self.commitData(editor)
+            except Exception:
+                logging.debug("JOB_TABLE commitData failed:\n%s", traceback.format_exc())
+        super().closeEditor(editor, hint)
+
     def mousePressEvent(self, event) -> None:
         super().mousePressEvent(event)
         index = self.indexAt(event.position().toPoint())
