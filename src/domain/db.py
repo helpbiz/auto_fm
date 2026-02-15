@@ -9,6 +9,10 @@ from pathlib import Path
 
 APP_NAME = "auto_fm"
 
+# 로그 중복 방지: 이미 로그한 경로/디렉터리
+_logged_db_paths: set = set()
+_logged_db_dirs: set = set()
+
 
 def get_app_base_dir() -> Path:
     if getattr(sys, "frozen", False):
@@ -33,7 +37,10 @@ def _ensure_writable_dir(path: Path) -> None:
     test_file = path / "._write_test"
     try:
         test_file.write_text("ok", encoding="utf-8")
-        logging.info("DB dir writable: %s", path)
+        key = str(path.resolve())
+        if key not in _logged_db_dirs:
+            logging.debug("DB dir writable: %s", path)
+            _logged_db_dirs.add(key)
     finally:
         if test_file.exists():
             test_file.unlink()
@@ -52,13 +59,20 @@ def get_db_path() -> Path:
     if override:
         path = Path(override)
         _ensure_writable_dir(path.parent)
+        key = str(path.resolve())
+        if key not in _logged_db_paths:
+            logging.debug("DB path resolved: %s", path)
+            _logged_db_paths.add(key)
         return path
 
     data_dir = _get_default_db_dir()
     _ensure_writable_dir(data_dir)
     db_path = data_dir / "app.db"
     _migrate_legacy_db(db_path)
-    logging.info("DB path resolved: %s", db_path)
+    key = str(db_path.resolve())
+    if key not in _logged_db_paths:
+        logging.debug("DB path resolved: %s", db_path)
+        _logged_db_paths.add(key)
     return db_path
 
 

@@ -59,7 +59,7 @@ class LaborCostCalculator:
 
     def _calculate_from_daily_wage_total(self, daily_wage_total: Decimal) -> Dict[str, int]:
 
-        # 2) 기본급(월)
+        # 2) 기본급(월) = 노임단가 분가 "해당 직종 M/D기본급(원/일) × 월 근무일수" (1원 미만 버림)
         base_salary = drop_under_1_won(
             daily_wage_total * self.context.monthly_workdays
         )
@@ -75,11 +75,12 @@ class LaborCostCalculator:
             bonus,
         )
 
-        # 5) 주휴수당
+        # 5) 주휴수당 (모든 직급 0 적용)
         weekly_allowance = drop_under_1_won(
             ordinary_hourly_wage
             * self.context.daily_work_hours
             * self.context.weekly_holiday_days
+            * Decimal("0")
         )
 
         # 6) 연차수당
@@ -95,10 +96,11 @@ class LaborCostCalculator:
             ordinary_hourly_wage * overtime_hours
         )
 
-        # 6-2) 휴일근로수당 (시간 단위, 없으면 0)
-        holiday_work_hours = getattr(self.context, "holiday_work_hours", Decimal("0"))
+        # 6-2) 휴일근로수당 = 통상일급(통상시간급×8) × 휴일근로일수 × 150%
+        holiday_work_days = getattr(self.context, "holiday_work_days", Decimal("0"))
+        ordinary_daily_wage = ordinary_hourly_wage * self.context.daily_work_hours
         holiday_work_allowance = drop_under_1_won(
-            ordinary_hourly_wage * holiday_work_hours
+            ordinary_daily_wage * holiday_work_days * Decimal("1.5")
         )
 
         # 7) 제수당 합계
@@ -294,8 +296,9 @@ class LaborCostCalculator:
             overtime=overtime,
             total=total,
             base_salary=per_person["base_salary"] * headcount,
+            bonus=per_person["bonus"] * headcount,
             allowances=per_person["allowance"] * headcount,
-            insurance_total=per_person["insurance_total"] * headcount,
+            retirement=per_person["retirement"] * headcount,
             labor_subtotal=per_person["labor_subtotal"] * headcount,
             role_total=per_person["labor_subtotal"] * headcount,
         )
@@ -316,7 +319,7 @@ class LaborCostCalculator:
 
     def _calculate_base_salary(self, daily_wage_total: Decimal) -> Decimal:
         """
-        기본급(월) = 일급 합계 × 월 근무일수(예: 20.6일)
+        기본급(월) = 노임단가 분가 "해당 직종 M/D기본급(원/일) × 월 근무일수" (1원 미만 버림)
         """
         return daily_wage_total * self.context.monthly_workdays
 
@@ -332,9 +335,10 @@ class LaborCostCalculator:
         bonus: Decimal,
     ) -> Decimal:
         """
-        통상시간급 = 시간급 + (상여금 ÷ 209시간)
+        통상시간급 = (md_basic ÷ 일 근무시간) + (상여금 ÷ 209)
+        md_basic: M/D 기본급(원/일). 노무비 상세에서는 wages_master.json md_basic 사용.
         """
-        # 시간급 = 일급 합계 ÷ 1일 근무시간 (즉시 절사)
+        # 시간급 = md_basic(원/일) ÷ 1일 근무시간 (즉시 절사)
         if self.context.daily_work_hours == 0:
             hourly_wage = Decimal("0")
         else:

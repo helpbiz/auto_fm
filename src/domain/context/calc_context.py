@@ -32,6 +32,6 @@ class CalcContext:
     # 경비
     expenses: Dict[str, Decimal]        # 경비명 -> 금액
 
-    # 추가 수당 기준 (시간 단위)
-    overtime_hours: Decimal = Decimal("0")
-    holiday_work_hours: Decimal = Decimal("0")
+    # 추가 수당 기준
+    overtime_hours: Decimal = Decimal("0")   # 시간 단위
+    holiday_work_days: Decimal = Decimal("0")  # 휴일근로일수 (일 단위)

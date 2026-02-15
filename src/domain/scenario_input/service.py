@@ -27,7 +27,7 @@ MAX_HEADCOUNT = 10_000.0
 MAX_WORK_DAYS = 31.0
 MAX_WORK_HOURS = 24.0
 MAX_OVERTIME_HOURS = 200.0
-MAX_HOLIDAY_WORK_HOURS = 200.0
+MAX_HOLIDAY_WORK_DAYS = 31.0
 MAX_QUANTITY = 1_000_000.0
 MAX_UNIT_PRICE = 100_000_000
 
@@ -43,6 +43,14 @@ def post_scenario_input(
         raise ScenarioInputValidationError(errors)
     _save_canonical(conn, scenario_id, canonical)
     return canonical
+
+
+def save_canonical_direct(conn, scenario_id: str, canonical: dict) -> None:
+    """집계 시 사용한 canonical을 그대로 DB에 저장. normalize/validate 없이 직렬화만 수행."""
+    errors = validate_scenario_input(canonical)
+    if errors:
+        raise ScenarioInputValidationError(errors)
+    _save_canonical(conn, scenario_id, canonical)
 
 
 def get_scenario_input(scenario_id: str, conn) -> dict:
@@ -73,6 +81,65 @@ def list_scenario_ids(conn) -> list[str]:
     return [row[0] for row in rows]
 
 
+def list_scenarios(conn) -> list[tuple[str, str]]:
+    """(scenario_id, display_name) 목록. display_name은 input_json의 _display_name, 없으면 scenario_id."""
+    rows = conn.execute(
+        "SELECT scenario_id, input_json FROM scenario_input ORDER BY scenario_id",
+    ).fetchall()
+    result = []
+    for scenario_id, input_json in rows:
+        display_name = scenario_id
+        try:
+            data = json.loads(input_json) if input_json else {}
+            if isinstance(data, dict) and data.get("_display_name"):
+                display_name = str(data["_display_name"]).strip() or scenario_id
+        except (TypeError, ValueError):
+            pass
+        result.append((scenario_id, display_name))
+    return result
+
+
+def resolve_scenario_id(conn, scenario_name: str, sanitize_fn) -> str:
+    """불러오기 시 사용할 scenario_id. 한글 제거 등으로 id가 달라져도 저장된 시나리오를 찾도록 보정."""
+    sid = sanitize_fn(scenario_name) if scenario_name else ""
+    if not sid:
+        return "default"
+    row = conn.execute(
+        "SELECT 1 FROM scenario_input WHERE scenario_id = ?",
+        (sid,),
+    ).fetchone()
+    if row is not None:
+        return sid
+    # 예: "2023설계" -> "2023", 저장된 id는 "2023_" 인 경우
+    alt = sid + "_"
+    row2 = conn.execute(
+        "SELECT 1 FROM scenario_input WHERE scenario_id = ?",
+        (alt,),
+    ).fetchone()
+    if row2 is not None:
+        return alt
+    return sid
+
+
+def delete_scenario(scenario_id: str, conn) -> None:
+    """시나리오 ID에 해당하는 DB 데이터를 모두 삭제한다. (FK 순서 준수)"""
+    if not scenario_id or scenario_id.strip() == "":
+        raise ValueError("scenario_id가 비어 있습니다.")
+    # default 시나리오는 삭제 불가
+    if scenario_id.strip().lower() == "default":
+        raise ValueError("default 시나리오는 삭제할 수 없습니다.")
+    # FK 순서: sub_item → pricebook → expense_item, job_rate → job_role → calculation_result → scenario_input
+    conn.execute("DELETE FROM md_expense_sub_item WHERE scenario_id=?", (scenario_id,))
+    conn.execute("DELETE FROM md_expense_pricebook WHERE scenario_id=?", (scenario_id,))
+    conn.execute("DELETE FROM md_expense_item WHERE scenario_id=?", (scenario_id,))
+    conn.execute("DELETE FROM md_job_rate WHERE scenario_id=?", (scenario_id,))
+    conn.execute("DELETE FROM md_job_role WHERE scenario_id=?", (scenario_id,))
+    conn.execute("DELETE FROM calculation_result WHERE scenario_id=?", (scenario_id,))
+    conn.execute("DELETE FROM scenario_input WHERE scenario_id=?", (scenario_id,))
+    conn.commit()
+    logging.info("시나리오 삭제 완료: %s", scenario_id)
+
+
 def normalize_scenario_input(raw: dict, scenario_id: str, conn) -> dict:
     repo = MasterDataRepo(conn)
     job_roles = repo.get_job_roles(scenario_id)
@@ -82,14 +149,23 @@ def normalize_scenario_input(raw: dict, scenario_id: str, conn) -> dict:
     labor_job_roles = _normalize_labor(raw, job_roles)
     expense_items_map = _normalize_expenses(raw, expense_items, expense_pricebook)
 
-    return {
-        "labor": {
-            "job_roles": labor_job_roles,
-        },
-        "expenses": {
-            "items": expense_items_map,
-        },
+    result = {
+        "labor": {"job_roles": labor_job_roles},
+        "expenses": {"items": expense_items_map},
     }
+    # 저장/로드 시 복원할 선택 항목 보존
+    for key in (
+        "overhead_rate",
+        "profit_rate",
+        "base_year",
+        "wage_year",
+        "wage_half",
+        "_display_name",
+        "holiday_work_days_calc",
+    ):
+        if key in raw and raw[key] is not None:
+            result[key] = raw[key]
+    return result
 
 
 def validate_scenario_input(canonical: dict) -> list[ValidationError]:
@@ -102,7 +178,7 @@ def validate_scenario_input(canonical: dict) -> list[ValidationError]:
         work_days = values.get("work_days")
         work_hours = values.get("work_hours", 0.0)
         overtime_hours = values.get("overtime_hours", 0.0)
-        holiday_work_hours = values.get("holiday_work_hours", 0.0)
+        holiday_work_days = values.get("holiday_work_days", values.get("holiday_work_hours", 0.0))
 
         _validate_float(
             errors,
@@ -134,10 +210,10 @@ def validate_scenario_input(canonical: dict) -> list[ValidationError]:
         )
         _validate_float(
             errors,
-            holiday_work_hours,
-            f"labor.job_roles.{job_code}.holiday_work_hours",
+            holiday_work_days,
+            f"labor.job_roles.{job_code}.holiday_work_days",
             0.0,
-            MAX_HOLIDAY_WORK_HOURS,
+            MAX_HOLIDAY_WORK_DAYS,
         )
 
     expenses = canonical.get("expenses", {})
@@ -189,20 +265,20 @@ def _normalize_labor(raw: dict, job_roles: list[JobRole]) -> dict[str, dict[str,
         work_days = _read_float(values.get("work_days"))
         work_hours = _read_float(values.get("work_hours"))
         overtime_hours = _read_float(values.get("overtime_hours"))
-        holiday_work_hours = _read_float(values.get("holiday_work_hours"))
+        holiday_work_days = _read_float(values.get("holiday_work_days", values.get("holiday_work_hours")))
         if _is_non_zero_labor(
             headcount,
             work_days,
             work_hours,
             overtime_hours,
-            holiday_work_hours,
+            holiday_work_days,
         ):
             labor_job_roles[role.job_code] = {
                 "headcount": headcount,
                 "work_days": work_days,
                 "work_hours": work_hours,
                 "overtime_hours": overtime_hours,
-                "holiday_work_hours": holiday_work_hours,
+                "holiday_work_days": holiday_work_days,
             }
     return labor_job_roles
 
@@ -251,20 +327,20 @@ def _coerce_labor_job_roles(raw: dict) -> dict[str, dict[str, float]]:
         work_days = _read_float(values.get("work_days"))
         work_hours = _read_float(values.get("work_hours"))
         overtime_hours = _read_float(values.get("overtime_hours"))
-        holiday_work_hours = _read_float(values.get("holiday_work_hours"))
+        holiday_work_days = _read_float(values.get("holiday_work_days", values.get("holiday_work_hours")))
         if _is_non_zero_labor(
             headcount,
             work_days,
             work_hours,
             overtime_hours,
-            holiday_work_hours,
+            holiday_work_days,
         ):
             normalized[job_code] = {
                 "headcount": headcount,
                 "work_days": work_days,
                 "work_hours": work_hours,
                 "overtime_hours": overtime_hours,
-                "holiday_work_hours": holiday_work_hours,
+                "holiday_work_days": holiday_work_days,
             }
     return normalized
 
@@ -308,7 +384,10 @@ def _is_canonical(raw: dict) -> bool:
 
 
 def _empty_canonical() -> dict:
-    return {"labor": {"job_roles": {}}, "expenses": {"items": {}}}
+    return {
+        "labor": {"job_roles": {}},
+        "expenses": {"items": {}},
+    }
 
 
 def _save_canonical(conn, scenario_id: str, canonical: dict) -> None:
@@ -330,13 +409,13 @@ def _save_canonical(conn, scenario_id: str, canonical: dict) -> None:
         db_path = get_db_path()
         size = os.path.getsize(db_path) if os.path.exists(db_path) else -1
         logging.info(
-            "scenario_input commit ok: %s rows=%s db_size=%s",
+            "시나리오 입력 DB 반영 완료: 시나리오=%s 반영행=%s db크기=%s",
             scenario_id,
             changes_after - changes_before,
             size,
         )
     except sqlite3.OperationalError as exc:
-        logging.error("scenario_input commit failed: %s (%s)", scenario_id, exc)
+        logging.error("시나리오 입력 DB 반영 실패: 시나리오=%s (%s)", scenario_id, exc)
         if "disk I/O error" in str(exc).lower():
             handle_disk_io_error(get_db_path())
         raise
@@ -373,14 +452,14 @@ def _is_non_zero_labor(
     work_days: float,
     work_hours: float,
     overtime_hours: float,
-    holiday_work_hours: float,
+    holiday_work_days: float,
 ) -> bool:
     return any(
         value != 0
         for value in (
             headcount,
             overtime_hours,
-            holiday_work_hours,
+            holiday_work_days,
         )
     )
 

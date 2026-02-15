@@ -2,8 +2,6 @@ import logging
 import os
 import re
 import traceback
-from functools import partial
-
 from PyQt6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -19,14 +17,17 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QTimer, QObject, QEvent
 from PyQt6.QtGui import QDoubleValidator
 
+from src.domain.constants.job_data import get_job_mapping_from_file
+
 COL_JOB_CODE = 0
 COL_JOB_NAME = 1
-COL_WORK_DAYS = 2
-COL_WORK_HOURS = 3
-COL_OVERTIME_HOURS = 4
-COL_HOLIDAY_HOURS = 5
-COL_HEADCOUNT = 6
-COL_MAX = 6
+COL_GRADE = 2   # 직종 (job_mapping grade, 읽기 전용)
+COL_WORK_DAYS = 3
+COL_WORK_HOURS = 4
+COL_OVERTIME_HOURS = 5
+COL_HOLIDAY_HOURS = 6
+COL_HEADCOUNT = 7
+COL_MAX = 7
 
 _LOG_READY = False
 
@@ -40,6 +41,7 @@ def setup_qtable_debug_log(log_path: str) -> str:
             level=logging.DEBUG,
             format="%(asctime)s.%(msecs)03d [%(levelname)s] %(message)s",
             datefmt="%Y-%m-%d %H:%M:%S",
+            encoding="utf-8",
         )
         _LOG_READY = True
     return log_path
@@ -169,8 +171,8 @@ def hook_suspicious_methods(table: QTableWidget, name: str = "qtable") -> None:
     def set_edit_triggers_hook(val):
         v_int = _to_int_safe(val)
         v_repr = repr(val)
-        logging.warning(
-            f"{name}.setEditTriggers(val={v_repr}, int={v_int}) called!"
+        logging.debug(
+            "%s.setEditTriggers(val=%s, int=%s) called!", name, v_repr, v_int
         )
         return orig_set_edit_triggers(val)
 
@@ -274,9 +276,18 @@ class JobRoleTableWidget(QTableWidget):
                 self.closeEditor(editor, QAbstractItemDelegate.EndEditHint.SubmitModelCache)
 
             if col < COL_HEADCOUNT:
-                next_col = col + 1
                 self._ensure_row_items(row)
                 self._set_job_name_readonly(row)
+                self._set_grade_readonly(row)
+                # 입력 가능한 컬럼만 이동: 직무코드(0) → 인원(7)
+                next_col = col + 1
+                while next_col < COL_HEADCOUNT:
+                    it = self.item(row, next_col)
+                    if it is not None and (it.flags() & Qt.ItemFlag.ItemIsEditable):
+                        break
+                    next_col += 1
+                if next_col >= COL_HEADCOUNT:
+                    next_col = COL_HEADCOUNT
                 self.setCurrentCell(row, next_col)
                 self.editItem(self.item(row, next_col))
                 logging.debug("JOB_TABLE move to row=%s col=%s", row, next_col)
@@ -285,6 +296,7 @@ class JobRoleTableWidget(QTableWidget):
             if col == COL_HEADCOUNT:
                 self._ensure_row_items(row)
                 self._set_job_name_readonly(row)
+                self._set_grade_readonly(row)
                 job_code = (self.item(row, COL_JOB_CODE).text() or "").strip()
                 headcount = (self.item(row, COL_HEADCOUNT).text() or "").strip()
                 valid = bool(job_code) and bool(headcount)
@@ -296,6 +308,7 @@ class JobRoleTableWidget(QTableWidget):
                         logging.debug("JOB_TABLE inserted row=%s", next_row)
                     self._ensure_row_items(next_row)
                     self._set_job_name_readonly(next_row)
+                    self._set_grade_readonly(next_row)
                     self.setCurrentCell(next_row, COL_JOB_CODE)
                     self.editItem(self.item(next_row, COL_JOB_CODE))
                     logging.debug("JOB_TABLE move to row=%s col=%s", next_row, COL_JOB_CODE)
@@ -319,6 +332,13 @@ class JobRoleTableWidget(QTableWidget):
             self.setItem(row, COL_JOB_NAME, item)
         item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
 
+    def _set_grade_readonly(self, row: int) -> None:
+        item = self.item(row, COL_GRADE)
+        if item is None:
+            item = QTableWidgetItem("")
+            self.setItem(row, COL_GRADE, item)
+        item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+
 
 class FloatItemDelegate(QStyledItemDelegate):
     def __init__(self, parent=None, max_value: float = 1_000_000.0):
@@ -331,11 +351,53 @@ class FloatItemDelegate(QStyledItemDelegate):
         editor.setValidator(self._validator)
         return editor
 
+    def setModelData(self, editor, model, index):
+        super().setModelData(editor, model, index)
+        panel = getattr(self.parent(), "parent", lambda: None)()
+        if panel is not None and getattr(panel, "_external_on_change", None):
+            QTimer.singleShot(0, panel._external_on_change)
+
+
+class JobCodeComboDelegate(QStyledItemDelegate):
+    """직무코드 컬럼 전용: 편집 시 QComboBox로 선택, 평소에는 셀 텍스트로만 표시."""
+
+    def __init__(self, job_role_panel: "JobRoleTable"):
+        super().__init__(job_role_panel.table)
+        self._panel = job_role_panel
+
+    def createEditor(self, parent, option, index):
+        combo = QComboBox(parent)
+        combo.setMinimumWidth(120)
+        combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+        combo.addItem("")
+        for role in self._panel._available_roles:
+            combo.addItem(role["job_code"])
+        return combo
+
+    def setEditorData(self, editor, index):
+        value = index.data(Qt.ItemDataRole.EditRole) or ""
+        if isinstance(value, str):
+            idx = editor.findText(value)
+            editor.setCurrentIndex(idx if idx >= 0 else 0)
+
+    def setModelData(self, editor, model, index):
+        text = (editor.currentText() or "").strip()
+        model.setData(index, text, Qt.ItemDataRole.EditRole)
+        if self._panel._external_on_change:
+            QTimer.singleShot(0, self._panel._external_on_change)
+
 
 class JobRoleTable(QWidget):
     """
     직무별 입력 테이블 (표준은 읽기 전용)
     """
+    # 클래스 상수로 플래그 정의
+    EDITABLE_FLAGS = (
+        Qt.ItemFlag.ItemIsSelectable
+        | Qt.ItemFlag.ItemIsEnabled
+        | Qt.ItemFlag.ItemIsEditable
+    )
+    READONLY_FLAGS = Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled
 
     def __init__(self):
         super().__init__()
@@ -350,14 +412,8 @@ class JobRoleTable(QWidget):
         title.setStyleSheet("font-weight: bold;")
         layout.addWidget(title)
 
-        editable_flags = (
-            Qt.ItemFlag.ItemIsSelectable
-            | Qt.ItemFlag.ItemIsEnabled
-            | Qt.ItemFlag.ItemIsEditable
-        )
-        readonly_flags = Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled
-
-        self.table = JobRoleTableWidget(0, 7)
+        self.table = JobRoleTableWidget(0, 8)
+        self.table.setItemDelegateForColumn(COL_JOB_CODE, JobCodeComboDelegate(self))
         float_delegate = FloatItemDelegate(self.table)
         for col in range(COL_WORK_DAYS, COL_HEADCOUNT + 1):
             self.table.setItemDelegateForColumn(col, float_delegate)
@@ -365,13 +421,16 @@ class JobRoleTable(QWidget):
             [
                 "직무코드",
                 "직무명",
+                "직종",
                 "근무일수",
                 "근무시간",
                 "연장시간",
-                "휴일근로시간",
+                "휴일근로일수",
                 "인원",
             ]
         )
+        self.table.horizontalHeader().setMinimumSectionSize(80)
+        self.table.setColumnWidth(COL_JOB_CODE, 140)
         self.table.setEditTriggers(
             QAbstractItemView.EditTrigger.DoubleClicked
             | QAbstractItemView.EditTrigger.SelectedClicked
@@ -401,32 +460,37 @@ class JobRoleTable(QWidget):
                 self.table.closeEditor(editor, QAbstractItemDelegate.EndEditHint.SubmitModelCache)
             self._available_roles = roles
             self._role_name_map = {r["job_code"]: r["job_name"] for r in roles}
+            job_mapping = get_job_mapping_from_file()
             self.table.setRowCount(0)
             for role in roles:
                 row_idx = self.table.rowCount()
                 self.table.insertRow(row_idx)
                 job_code = role["job_code"]
                 job_name = role["job_name"]
+                grade = (job_mapping.get(job_code) or {}).get("grade", "") if isinstance(job_mapping.get(job_code), dict) else ""
 
                 code_item = QTableWidgetItem(job_code)
-                code_item.setFlags(readonly_flags)
+                code_item.setFlags(self.EDITABLE_FLAGS)
                 name_item = QTableWidgetItem(job_name)
-                name_item.setFlags(readonly_flags)
+                name_item.setFlags(self.READONLY_FLAGS)
+                grade_item = QTableWidgetItem(grade)
+                grade_item.setFlags(self.READONLY_FLAGS)
 
                 self.table.setItem(row_idx, COL_JOB_CODE, code_item)
                 self.table.setItem(row_idx, COL_JOB_NAME, name_item)
-                self._install_job_code_combo(row_idx, job_code)
+                self.table.setItem(row_idx, COL_GRADE, grade_item)
 
+                # 근무일수·근무시간만 읽기 전용, 연장·휴일근로·인원은 수정 가능
                 work_days_item = QTableWidgetItem(str(default_work_days))
-                work_days_item.setFlags(editable_flags)
+                work_days_item.setFlags(self.READONLY_FLAGS)
                 work_hours_item = QTableWidgetItem(str(default_work_hours))
-                work_hours_item.setFlags(editable_flags)
+                work_hours_item.setFlags(self.READONLY_FLAGS)
                 overtime_item = QTableWidgetItem("0")
-                overtime_item.setFlags(editable_flags)
+                overtime_item.setFlags(self.EDITABLE_FLAGS)
                 holiday_item = QTableWidgetItem("0")
-                holiday_item.setFlags(editable_flags)
+                holiday_item.setFlags(self.EDITABLE_FLAGS)
                 headcount_item = QTableWidgetItem("0")
-                headcount_item.setFlags(editable_flags)
+                headcount_item.setFlags(self.EDITABLE_FLAGS)
 
                 self.table.setItem(row_idx, COL_WORK_DAYS, work_days_item)
                 self.table.setItem(row_idx, COL_WORK_HOURS, work_hours_item)
@@ -436,6 +500,8 @@ class JobRoleTable(QWidget):
 
                 self.table._ensure_row_items(row_idx)
                 self.table._set_job_name_readonly(row_idx)
+                self.table._set_grade_readonly(row_idx)
+                self._set_auto_columns_readonly_for_row(row_idx)
             self._force_editable()
         finally:
             self.table.blockSignals(False)
@@ -450,12 +516,15 @@ class JobRoleTable(QWidget):
         try:
             for row in range(self.table.rowCount()):
                 job_code = self._get_job_code(row)
-                values = job_inputs.get(job_code, {})
+                if job_code not in job_inputs:
+                    continue  # 저장된 데이터 없는 직무는 기본값 유지
+                values = job_inputs[job_code]
                 self.table.item(row, COL_WORK_DAYS).setText(str(values.get("work_days", 0)))
                 self.table.item(row, COL_WORK_HOURS).setText(str(values.get("work_hours", 0)))
                 self.table.item(row, COL_OVERTIME_HOURS).setText(str(values.get("overtime_hours", 0)))
-                self.table.item(row, COL_HOLIDAY_HOURS).setText(str(values.get("holiday_work_hours", 0)))
-                self.table.item(row, COL_HEADCOUNT).setText(str(values.get("headcount", 0)))
+                self.table.item(row, COL_HOLIDAY_HOURS).setText(str(values.get("holiday_work_days", values.get("holiday_work_hours", 0))))
+                hc = values.get("headcount", 0)
+                self.table.item(row, COL_HEADCOUNT).setText(str(int(hc)) if isinstance(hc, float) and hc == int(hc) else str(hc))
             self._force_editable()
         finally:
             self.table.blockSignals(False)
@@ -472,23 +541,31 @@ class JobRoleTable(QWidget):
         for row in range(self.table.rowCount()):
             job_code = self._get_job_code(row)
             if not job_code:
-                logging.warning("JobRoleTable: empty job_code at row=%s", row)
+                logging.debug("JobRoleTable: empty job_code at row=%s", row)
                 continue
 
             def safe_get(col: int) -> str:
                 item = self.table.item(row, col)
                 return item.text().strip() if item and item.text() else "0"
 
+            fallback = {
+                "work_days": 0.0,
+                "work_hours": 0.0,
+                "overtime_hours": 0.0,
+                "holiday_work_days": 0.0,
+                "headcount": 0,
+            }
             try:
                 result[job_code] = {
                     "work_days": self._to_float(safe_get(COL_WORK_DAYS)),
                     "work_hours": self._to_float(safe_get(COL_WORK_HOURS)),
                     "overtime_hours": self._to_float(safe_get(COL_OVERTIME_HOURS)),
-                    "holiday_work_hours": self._to_float(safe_get(COL_HOLIDAY_HOURS)),
+                    "holiday_work_days": self._to_float(safe_get(COL_HOLIDAY_HOURS)),
                     "headcount": self._to_int(safe_get(COL_HEADCOUNT)),
                 }
             except Exception as exc:
-                logging.debug("JobRoleTable: extract row %s failed: %s", row, exc)
+                logging.warning("JobRoleTable: extract row %s failed, using fallback: %s", row, exc)
+                result[job_code] = fallback
 
         logging.debug("JobRoleTable: total jobs extracted: %s", list(result.keys()))
         return result
@@ -499,9 +576,36 @@ class JobRoleTable(QWidget):
     def _handle_item_changed(self, item) -> None:
         if self._loading:
             return
+        if item.column() == COL_JOB_CODE:
+            self._sync_name_grade_for_row(item.row())
         self.dirty = True
         if self._external_on_change:
-            self._external_on_change()
+            # Defer so delegate commit and model update are done before 노무비 상세 자동계산
+            QTimer.singleShot(0, self._external_on_change)
+
+    def _sync_name_grade_for_row(self, row: int) -> None:
+        """직무코드 셀 변경 시 해당 행의 직무명·직종을 동기화 (시그널 차단하여 itemChanged 중복 방지)."""
+        code = (self.table.item(row, COL_JOB_CODE).text() or "").strip() if self.table.item(row, COL_JOB_CODE) else ""
+        name = self._role_name_map.get(code, "")
+        job_mapping = get_job_mapping_from_file()
+        meta = job_mapping.get(code) or {}
+        grade = meta.get("grade", "") if isinstance(meta, dict) else ""
+        self.table.blockSignals(True)
+        try:
+            name_item = self.table.item(row, COL_JOB_NAME)
+            if name_item is None:
+                name_item = QTableWidgetItem("")
+                self.table.setItem(row, COL_JOB_NAME, name_item)
+            name_item.setText(name)
+            self.table._set_job_name_readonly(row)
+            grade_item = self.table.item(row, COL_GRADE)
+            if grade_item is None:
+                grade_item = QTableWidgetItem("")
+                self.table.setItem(row, COL_GRADE, grade_item)
+            grade_item.setText(grade)
+            self.table._set_grade_readonly(row)
+        finally:
+            self.table.blockSignals(False)
 
     def is_editing(self) -> bool:
         if self.table.state() == QAbstractItemView.State.EditingState:
@@ -513,45 +617,32 @@ class JobRoleTable(QWidget):
         row = self.table.rowCount()
         self.table.insertRow(row)
         self.table._ensure_row_items(row)
-        self._install_job_code_combo(row, "")
+        code_item = self.table.item(row, COL_JOB_CODE)
+        if code_item is not None:
+            code_item.setFlags(self.EDITABLE_FLAGS)
         self.table._set_job_name_readonly(row)
+        self.table._set_grade_readonly(row)
+        # 근무일수·근무시간만 읽기 전용, 연장·휴일근로·인원은 수정 가능
+        self.table.setItem(row, COL_WORK_DAYS, QTableWidgetItem("22"))
+        self.table.setItem(row, COL_WORK_HOURS, QTableWidgetItem("8"))
+        overtime_item = QTableWidgetItem("0")
+        overtime_item.setFlags(self.EDITABLE_FLAGS)
+        self.table.setItem(row, COL_OVERTIME_HOURS, overtime_item)
+        holiday_item = QTableWidgetItem("0")
+        holiday_item.setFlags(self.EDITABLE_FLAGS)
+        self.table.setItem(row, COL_HOLIDAY_HOURS, holiday_item)
+        self._set_auto_columns_readonly_for_row(row)
+        headcount_item = self.table.item(row, COL_HEADCOUNT)
+        if headcount_item is not None:
+            headcount_item.setFlags(self.EDITABLE_FLAGS)
 
     def set_available_roles(self, roles: list[dict]) -> None:
         self._available_roles = roles
         self._role_name_map = {r["job_code"]: r["job_name"] for r in roles}
-        for row in range(self.table.rowCount()):
-            current_code = self._get_job_code(row)
-            self._install_job_code_combo(row, current_code)
-
-    def _install_job_code_combo(self, row: int, current_code: str) -> None:
-        if not self._available_roles:
-            return
-        combo = QComboBox(self.table)
-        combo.addItem("")
-        for role in self._available_roles:
-            combo.addItem(role["job_code"])
-        idx = combo.findText(current_code)
-        combo.setCurrentIndex(idx if idx >= 0 else 0)
-        combo.currentTextChanged.connect(partial(self._on_job_code_changed, row))
-        self.table.setCellWidget(row, COL_JOB_CODE, combo)
-        if current_code:
-            self._on_job_code_changed(row, current_code)
-
-    def _on_job_code_changed(self, row: int, code: str) -> None:
-        name = self._role_name_map.get(code, "")
-        item = self.table.item(row, COL_JOB_NAME)
-        if item is None:
-            item = QTableWidgetItem("")
-            self.table.setItem(row, COL_JOB_NAME, item)
-        item.setText(name)
-        self.table._set_job_name_readonly(row)
 
     def _get_job_code(self, row: int) -> str:
-        widget = self.table.cellWidget(row, COL_JOB_CODE)
-        if isinstance(widget, QComboBox):
-            return widget.currentText()
         item = self.table.item(row, COL_JOB_CODE)
-        return item.text() if item is not None else ""
+        return (item.text() or "").strip() if item is not None else ""
 
     def _to_float(self, text: str) -> float:
         if not text:
@@ -571,8 +662,21 @@ class JobRoleTable(QWidget):
         except (ValueError, TypeError):
             return 0
 
+    def _set_auto_columns_readonly_for_row(self, row: int) -> None:
+        """근무일수·근무시간만 읽기 전용. 연장·휴일근로는 수정 가능."""
+        for col in (COL_WORK_DAYS, COL_WORK_HOURS):
+            item = self.table.item(row, col)
+            if item is not None:
+                item.setFlags(self.READONLY_FLAGS)
+
+    def _set_auto_columns_readonly(self) -> None:
+        """모든 행에 대해 근무일수·근무시간만 읽기 전용으로 설정."""
+        for row in range(self.table.rowCount()):
+            self._set_auto_columns_readonly_for_row(row)
+
     def _force_editable(self) -> None:
         _force_editable_full(self.table, tag="JOB_TABLE")
+        self._set_auto_columns_readonly()
         self._assert_editable()
 
     def _assert_editable(self) -> None:
@@ -580,8 +684,9 @@ class JobRoleTable(QWidget):
             raise RuntimeError("JobRoleTable: columnCount is 0")
         if self.table.rowCount() <= 0:
             raise RuntimeError("JobRoleTable: rowCount is 0")
-        item = self.table.item(0, 0)
+        # 직무코드(0)·인원(7)만 편집 가능; 편집 가능 셀인 인원(7)로 검사
+        item = self.table.item(0, COL_HEADCOUNT)
         if item is None:
-            raise RuntimeError("JobRoleTable: item(0,0) is None")
+            raise RuntimeError("JobRoleTable: item(0, COL_HEADCOUNT) is None")
         if not (item.flags() & Qt.ItemFlag.ItemIsEditable):
-            raise RuntimeError("JobRoleTable: item(0,0) is not editable")
+            raise RuntimeError("JobRoleTable: item(0, COL_HEADCOUNT) is not editable")
