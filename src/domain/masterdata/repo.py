@@ -43,6 +43,22 @@ class ExpensePrice:
     effective_to: Optional[str]
 
 
+@dataclass
+class ExpenseSubItem:
+    scenario_id: str
+    exp_code: str
+    sub_code: str
+    sub_name: str
+    spec: str
+    unit: str
+    quantity: float
+    unit_price: int
+    amount: int
+    remark: str
+    sort_order: int
+    is_active: int
+
+
 class MasterDataRepo:
     def __init__(self, conn=None):
         self._external = conn is not None
@@ -109,6 +125,117 @@ class MasterDataRepo:
             (scenario_id,),
         ).fetchall()
         return [ExpensePrice(*row) for row in rows]
+
+    def get_expense_sub_items(self, scenario_id: str, exp_code: str = None) -> list[ExpenseSubItem]:
+        if exp_code:
+            rows = self._conn.execute(
+                """
+                SELECT scenario_id, exp_code, sub_code, sub_name, spec, unit,
+                       quantity, unit_price, amount, remark, sort_order, is_active
+                FROM md_expense_sub_item
+                WHERE scenario_id=? AND exp_code=?
+                ORDER BY sort_order, sub_code
+                """,
+                (scenario_id, exp_code),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                """
+                SELECT scenario_id, exp_code, sub_code, sub_name, spec, unit,
+                       quantity, unit_price, amount, remark, sort_order, is_active
+                FROM md_expense_sub_item
+                WHERE scenario_id=?
+                ORDER BY exp_code, sort_order, sub_code
+                """,
+                (scenario_id,),
+            ).fetchall()
+        return [ExpenseSubItem(*row) for row in rows]
+
+    def ensure_job_roles_for_scenario(self, scenario_id: str) -> None:
+        """시나리오에 md_job_role이 없으면 default에서 복사. 불러오기 시 직무 목록이 비어 있지 않도록 함."""
+        existing = self._conn.execute(
+            "SELECT 1 FROM md_job_role WHERE scenario_id=? LIMIT 1",
+            (scenario_id,),
+        ).fetchone()
+        if existing is not None:
+            return
+        self._conn.execute(
+            """
+            INSERT INTO md_job_role (scenario_id, job_code, job_name, sort_order, is_active)
+            SELECT ?, job_code, job_name, sort_order, is_active
+            FROM md_job_role
+            WHERE scenario_id='default'
+            """,
+            (scenario_id,),
+        )
+        self._conn.execute(
+            """
+            INSERT INTO md_job_rate (scenario_id, job_code, wage_day, wage_hour, allowance_rate_json)
+            SELECT ?, job_code, wage_day, wage_hour, allowance_rate_json
+            FROM md_job_rate
+            WHERE scenario_id='default'
+            """,
+            (scenario_id,),
+        )
+        self._conn.commit()
+
+    def ensure_expense_masterdata_for_scenario(self, scenario_id: str) -> None:
+        """시나리오에 md_expense_item 행이 없으면 default에서 복사한다. (FK 오류 방지)"""
+        existing = self._conn.execute(
+            "SELECT 1 FROM md_expense_item WHERE scenario_id=? LIMIT 1",
+            (scenario_id,),
+        ).fetchone()
+        if existing is not None:
+            return
+        self._conn.execute(
+            """
+            INSERT INTO md_expense_item (scenario_id, exp_code, exp_name, group_code, sort_order, is_active)
+            SELECT ?, exp_code, exp_name, group_code, sort_order, is_active
+            FROM md_expense_item
+            WHERE scenario_id='default'
+            """,
+            (scenario_id,),
+        )
+        self._conn.execute(
+            """
+            INSERT INTO md_expense_pricebook (scenario_id, exp_code, unit_price, unit, effective_from, effective_to)
+            SELECT ?, exp_code, unit_price, unit, effective_from, effective_to
+            FROM md_expense_pricebook
+            WHERE scenario_id='default'
+            """,
+            (scenario_id,),
+        )
+        self._conn.commit()
+
+    def upsert_expense_sub_items(self, scenario_id: str, exp_code: str, sub_items: list[dict]) -> None:
+        """경비 세부 항목을 upsert한다."""
+        self._conn.execute(
+            "DELETE FROM md_expense_sub_item WHERE scenario_id=? AND exp_code=?",
+            (scenario_id, exp_code),
+        )
+        for si in sub_items:
+            self._conn.execute(
+                """
+                INSERT INTO md_expense_sub_item
+                  (scenario_id, exp_code, sub_code, sub_name, spec, unit,
+                   quantity, unit_price, amount, remark, sort_order, is_active)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    scenario_id, exp_code,
+                    si.get("sub_code", ""),
+                    si.get("sub_name", ""),
+                    si.get("spec", ""),
+                    si.get("unit", "식"),
+                    si.get("quantity", 0),
+                    si.get("unit_price", 0),
+                    si.get("amount", 0),
+                    si.get("remark", ""),
+                    si.get("sort_order", 0),
+                    si.get("is_active", 1),
+                ),
+            )
+        self._conn.commit()
 
     def _parse_allowance_json(self, raw: str) -> dict[str, float]:
         try:

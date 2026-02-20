@@ -35,8 +35,10 @@ def normalize_job_inputs(
         or labor_inputs.get("overtime_hours")
         or 0
     )
-    holiday_work_hours = _read_float(
-        inputs.get("holiday_work_hours")
+    holiday_work_days = _read_float(
+        inputs.get("holiday_work_days")
+        or inputs.get("holiday_work_hours")
+        or labor_inputs.get("holiday_work_days")
         or labor_inputs.get("holiday_work_hours")
         or 0
     )
@@ -49,7 +51,7 @@ def normalize_job_inputs(
             "work_days": work_days,
             "work_hours": work_hours,
             "overtime_hours": overtime_hours,
-            "holiday_work_hours": holiday_work_hours,
+            "holiday_work_days": holiday_work_days,
         }
 
     if normalized and any(line["headcount"] > 0 for line in normalized.values()):
@@ -73,7 +75,7 @@ def normalize_job_inputs(
             "work_days": work_days,
             "work_hours": work_hours,
             "overtime_hours": overtime_hours,
-            "holiday_work_hours": holiday_work_hours,
+            "holiday_work_days": holiday_work_days,
         }
 
     return normalized

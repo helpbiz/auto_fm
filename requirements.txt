@@ -1,0 +1,5 @@
+# Production Dependencies
+PyQt6>=6.4.0
+openpyxl>=3.0.0
+matplotlib>=3.6.0# Modern Calculator UI (실시간 인건비/보험요율 미리보기)
+customtkinter>=5.2.0

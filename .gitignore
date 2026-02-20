@@ -1,0 +1,55 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+*.spec
+
+# IDE
+.vscode/
+.idea/
+
+# Environment
+.env
+venv/
+.venv/
+
+# Database
+*.db
+cost_calc.db
+
+# Test artifacts
+.coverage
+htmlcov/
+.pytest_cache/
+test_export_output*.xlsx
+test_formula_overwrite.xlsx
+
+# Build artifacts
+installer_output/
+NUL
+
+# Logs
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Exports
+src/exports/
+
+# Misc
+*.db-journal
+db_analysis.txt
+labor_calc_output.txt
+labor_calc_result.txt
+
+# Tool config
+.bkit/
+.claude/
+
+# User scenario data
+scenarios/

@@ -1,0 +1,192 @@
+{
+  "timestamp": "2026-02-15T19:01:41.739Z",
+  "reason": "compaction",
+  "status": {
+    "version": "2.0",
+    "lastUpdated": "2026-02-16T00:00:00.000Z",
+    "activeFeatures": [
+      "compare",
+      "constants",
+      "domain",
+      "result",
+      "calculator",
+      "masterdata",
+      "scenario_input",
+      "repositories",
+      "tests",
+      "scripts",
+      "context",
+      "export"
+    ],
+    "primaryFeature": "compare",
+    "features": {
+      "compare": {
+        "phase": "do",
+        "phaseNumber": 3,
+        "matchRate": null,
+        "iterationCount": 0,
+        "requirements": [],
+        "documents": {},
+        "timestamps": {
+          "started": "2026-02-11T08:45:14.530Z",
+          "lastUpdated": "2026-02-14T18:34:06.918Z"
+        },
+        "lastFile": "c:\\Users\\helpbiz\\Documents\\auto_fm\\auto_fm\\src\\ui\\compare\\compare_page.py"
+      },
+      "constants": {
+        "phase": "do",
+        "phaseNumber": 3,
+        "matchRate": null,
+        "iterationCount": 0,
+        "requirements": [],
+        "documents": {},
+        "timestamps": {
+          "started": "2026-02-14T08:52:25.177Z",
+          "lastUpdated": "2026-02-14T08:52:25.177Z"
+        },
+        "lastFile": "c:/Users/helpbiz/Documents/auto_fm/auto_fm/src/domain/constants/expense_groups.py"
+      },
+      "domain": {
+        "phase": "do",
+        "phaseNumber": 3,
+        "matchRate": null,
+        "iterationCount": 0,
+        "requirements": [],
+        "documents": {},
+        "timestamps": {
+          "started": "2026-02-14T09:15:41.513Z",
+          "lastUpdated": "2026-02-15T12:06:38.607Z"
+        },
+        "lastFile": "c:\\Users\\helpbiz\\Documents\\auto_fm\\auto_fm\\src\\domain\\normalization.py"
+      },
+      "result": {
+        "phase": "do",
+        "phaseNumber": 3,
+        "matchRate": null,
+        "iterationCount": 0,
+        "requirements": [],
+        "documents": {},
+        "timestamps": {
+          "started": "2026-02-14T09:16:13.578Z",
+          "lastUpdated": "2026-02-15T16:11:13.354Z"
+        },
+        "lastFile": "C:\\Users\\helpbiz\\Documents\\auto_fm\\auto_fm\\src\\domain\\result\\service.py"
+      },
+      "calculator": {
+        "phase": "do",
+        "phaseNumber": 3,
+        "matchRate": null,
+        "iterationCount": 0,
+        "requirements": [],
+        "documents": {},
+        "timestamps": {
+          "started": "2026-02-14T09:16:13.726Z",
+          "lastUpdated": "2026-02-15T13:23:29.674Z"
+        },
+        "lastFile": "c:\\Users\\helpbiz\\Documents\\auto_fm\\auto_fm\\src\\domain\\calculator\\labor.py"
+      },
+      "masterdata": {
+        "phase": "do",
+        "phaseNumber": 3,
+        "matchRate": null,
+        "iterationCount": 0,
+        "requirements": [],
+        "documents": {},
+        "timestamps": {
+          "started": "2026-02-14T10:59:16.639Z",
+          "lastUpdated": "2026-02-14T16:48:57.174Z"
+        },
+        "lastFile": "c:\\Users\\helpbiz\\Documents\\auto_fm\\auto_fm\\src\\domain\\masterdata\\repo.py"
+      },
+      "scenario_input": {
+        "phase": "do",
+        "phaseNumber": 3,
+        "matchRate": null,
+        "iterationCount": 0,
+        "requirements": [],
+        "documents": {},
+        "timestamps": {
+          "started": "2026-02-14T11:16:56.019Z",
+          "lastUpdated": "2026-02-15T15:09:23.647Z"
+        },
+        "lastFile": "c:\\Users\\helpbiz\\Documents\\auto_fm\\auto_fm\\src\\domain\\scenario_input\\service.py"
+      },
+      "repositories": {
+        "phase": "do",
+        "phaseNumber": 3,
+        "matchRate": null,
+        "iterationCount": 0,
+        "requirements": [],
+        "documents": {},
+        "timestamps": {
+          "started": "2026-02-14T16:31:44.428Z",
+          "lastUpdated": "2026-02-14T21:36:13.150Z"
+        },
+        "lastFile": "c:\\Users\\helpbiz\\Documents\\auto_fm\\auto_fm\\app\\repositories\\scenario_repository.py"
+      },
+      "tests": {
+        "phase": "do",
+        "phaseNumber": 3,
+        "matchRate": null,
+        "iterationCount": 0,
+        "requirements": [],
+        "documents": {},
+        "timestamps": {
+          "started": "2026-02-14T16:36:41.800Z",
+          "lastUpdated": "2026-02-14T16:36:41.818Z"
+        },
+        "lastFile": "c:\\Users\\helpbiz\\Documents\\auto_fm\\auto_fm\\tests\\app\\__init__.py"
+      },
+      "scripts": {
+        "phase": "do",
+        "phaseNumber": 3,
+        "matchRate": null,
+        "iterationCount": 0,
+        "requirements": [],
+        "documents": {},
+        "timestamps": {
+          "started": "2026-02-15T06:50:38.025Z",
+          "lastUpdated": "2026-02-15T13:23:29.893Z"
+        },
+        "lastFile": "c:\\Users\\helpbiz\\Documents\\auto_fm\\auto_fm\\scripts\\show_allowance_detail.py"
+      },
+      "context": {
+        "phase": "do",
+        "phaseNumber": 3,
+        "matchRate": null,
+        "iterationCount": 0,
+        "requirements": [],
+        "documents": {},
+        "timestamps": {
+          "started": "2026-02-15T12:05:55.786Z",
+          "lastUpdated": "2026-02-15T12:05:55.786Z"
+        },
+        "lastFile": "c:\\Users\\helpbiz\\Documents\\auto_fm\\auto_fm\\src\\domain\\context\\calc_context.py"
+      },
+      "export": {
+        "phase": "do",
+        "phaseNumber": 3,
+        "matchRate": null,
+        "iterationCount": 0,
+        "requirements": [],
+        "documents": {},
+        "timestamps": {
+          "started": "2026-02-15T18:08:47.765Z",
+          "lastUpdated": "2026-02-15T18:10:27.302Z"
+        },
+        "lastFile": "C:\\Users\\helpbiz\\Documents\\auto_fm\\auto_fm\\src\\domain\\export\\excel_exporter.py"
+      }
+    },
+    "pipeline": {
+      "currentPhase": 1,
+      "level": "Dynamic",
+      "phaseHistory": []
+    },
+    "session": {
+      "startedAt": "2026-02-11T07:14:07.097Z",
+      "onboardingCompleted": false,
+      "lastActivity": "2026-02-16T00:00:00.000Z"
+    },
+    "history": []
+  }
+}

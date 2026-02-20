@@ -11,7 +11,7 @@ from PyQt6.QtWidgets import (
     QTableWidgetItem,
     QFileDialog,
 )
-from PyQt6.QtGui import QPainter
+from PyQt6.QtGui import QPainter, QColor
 from PyQt6.QtPrintSupport import QPrinter
 
 from src.domain.result.service import calculate_result
@@ -196,9 +196,11 @@ class ComparePage(QWidget):
         printer.setOutputFileName(file_path)
 
         painter = QPainter(printer)
-        page_rect = printer.pageRect()
-        left_x = page_rect.left() + 40
-        right_x = page_rect.right() - 40
+        # PyQt6: pageRect() requires Unit argument
+        page_rect = printer.pageRect(QPrinter.Unit.DevicePixel)
+        # PyQt6: drawText() requires int coordinates, not float
+        left_x = int(page_rect.left() + 40)
+        right_x = int(page_rect.right() - 40)
         y = 40
         line_height = 20
 
@@ -218,7 +220,7 @@ class ComparePage(QWidget):
             painter.drawText(left_x, y, label)
             metrics = painter.fontMetrics()
             value_width = metrics.horizontalAdvance(value_text)
-            painter.drawText(right_x - value_width, y, value_text)
+            painter.drawText(int(right_x - value_width), y, value_text)
             y += line_height
 
         agg_a = self.last_compare["agg_a"]

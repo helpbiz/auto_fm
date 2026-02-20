@@ -59,7 +59,12 @@ from .job_role_table import (
     COL_HOLIDAY_HOURS,
     COL_HEADCOUNT,
 )
-from .expense_sub_item_table import ExpenseSubItemTable, build_sub_items_by_exp
+from .expense_sub_item_table import (
+    ExpenseSubItemTable,
+    build_sub_items_by_exp,
+    EXP_CODES_FROM_LABOR,
+    _sub_item_to_dict,
+)
 from .state import build_canonical_input, compute_action_state
 from .export_helpers import build_job_breakdown_rows, build_top_job_summary, build_detail_job_rows, TOP_N_JOB_ROLES
 from .donut_chart import DonutChartWidget
@@ -238,6 +243,7 @@ class MainWindow(QWidget):
         self.load_button = QPushButton("시나리오 불러오기")
         self.export_pdf_button = QPushButton("요약 PDF 내보내기")
         self.export_excel_button = QPushButton("상세 Excel 내보내기")
+        self.export_full_excel_button = QPushButton("양식 Excel 내보내기")
 
         self.calculate_button.clicked.connect(self.calculate)
         self.save_button.clicked.connect(self.save_scenario)
@@ -245,6 +251,7 @@ class MainWindow(QWidget):
         self.load_button.clicked.connect(self.load_scenario)
         self.export_pdf_button.clicked.connect(self.export_summary_pdf)
         self.export_excel_button.clicked.connect(self.export_details_excel)
+        self.export_full_excel_button.clicked.connect(self._export_full_excel)
 
         self.scenario_dir = Path(__file__).resolve().parents[2] / "scenarios"
         self.scenario_dir.mkdir(parents=True, exist_ok=True)
@@ -287,6 +294,7 @@ class MainWindow(QWidget):
         button_row.addWidget(self.load_button)
         button_row.addWidget(self.export_pdf_button)
         button_row.addWidget(self.export_excel_button)
+        button_row.addWidget(self.export_full_excel_button)
         layout.addLayout(button_row)
 
         root_layout.addWidget(content, 1)
@@ -312,6 +320,9 @@ class MainWindow(QWidget):
         self._job_role_debounce_timer = QTimer(self)
         self._job_role_debounce_timer.setSingleShot(True)
         self._job_role_debounce_timer.timeout.connect(self._do_job_role_changed)
+        self._expense_detail_debounce_timer = QTimer(self)
+        self._expense_detail_debounce_timer.setSingleShot(True)
+        self._expense_detail_debounce_timer.timeout.connect(self._on_expense_quantity_or_price_changed)
         self._last_labor_count = -1
         self._last_insurance_count = -1
         self._restoring_snapshot = False  # 불러오기 시 저장된 노무비 상세 복원 직후 자동계산으로 덮어쓰기 방지
@@ -321,9 +332,13 @@ class MainWindow(QWidget):
         self.holiday_work_days_panel.on_change(self._mark_dirty)
         self.job_role_table.on_change(self._on_job_role_changed)
         self.expense_sub_item_table.on_change(self._mark_dirty)
+        # 경비입력 수정 반영 시: 상태 메시지 + 경비상세 탭 재계산
+        self.expense_sub_item_table.apply_edit_applied.connect(self._on_expense_edit_applied)
         # 경비입력 탭 '경비코드 저장'만 연결. 시나리오 전체 저장(save_requested)은 여기서 연결하지 않음 → 집계 없이 경비만 저장 가능
         self.expense_sub_item_table.save_current_expense_requested.connect(self._save_current_expense_only)
         self.expense_sub_item_table.set_fetch_default_sub_items(self._fetch_default_expense_sub_items)
+        # 경비입력 수량/단가 변경 시 경비상세 자동 재계산 (디바운스)
+        self.expense_sub_item_table.quantity_or_price_changed.connect(self._debounce_expense_detail_refresh)
 
         # 시나리오 목록에서 선택 시 자동 로드
         self.input_panel.scenario_selected.connect(self._load_scenario_by_id)
@@ -404,27 +419,43 @@ class MainWindow(QWidget):
     # ── 테이블 편집 ──
 
     def _on_tab_changed(self, index: int) -> None:
+        # 탭 전환 전에 경비입력 테이블의 편집 내용을 메모리에 보존
+        commit_table_edit(self.expense_sub_item_table.table)
+        self.expense_sub_item_table._save_table_to_current_exp()
         self._force_editable_inputs()
-        # 노무비 상세(4), 경비 상세(5) 탭 선택 시 기존 표시 데이터 복원 (다른 동작으로 비워진 경우 대비)
-        if index == 4:
+        # 노무비 상세(5), 경비 상세(6) 탭 선택 시 기존 표시 데이터 복원
+        if index == 5:
             self.labor_detail.update_rows(self.last_labor_rows)
             self.labor_detail.update()
-        elif index == 5:
-            # 인원 합계 계산
-            total_headcount = sum(
-                v.get("headcount", 0) for v in self.job_role_table.get_job_inputs().values()
-            )
-            self.expense_detail.update_rows(self.last_expense_rows, total_headcount=total_headcount)
-            self.expense_detail.update()
+        elif index == 6:
+            # 경비상세 탭 전환 시 경비입력 메모리 기준으로 재계산
+            if self.expense_sub_item_table._sub_items_by_exp:
+                self._refresh_expense_detail_from_input()
+            else:
+                total_headcount = sum(
+                    v.get("headcount", 0) for v in self.job_role_table.get_job_inputs().values()
+                )
+                self.expense_detail.update_rows(self.last_expense_rows, total_headcount=total_headcount)
+                self.expense_detail.update()
 
     def _force_editable_inputs(self) -> None:
         commit_table_edit(self.job_role_table.table)
         commit_table_edit(self.expense_sub_item_table.table)
-        self.job_role_table._force_editable()
+        # 시그널 차단: _force_editable_full이 None 셀에 setItem 호출 시
+        # itemChanged → _on_job_role_changed → _do_job_role_changed 연쇄 방지
+        self.job_role_table.table.blockSignals(True)
+        try:
+            self.job_role_table._force_editable()
+        finally:
+            self.job_role_table.table.blockSignals(False)
+        self.expense_sub_item_table._ensure_editable()
 
     # ── 집계 ──
 
     def calculate(self):
+        # 예약된 노무비 자동계산이 집계 데이터를 덮어쓰지 않도록 타이머 중단
+        self._job_role_debounce_timer.stop()
+
         if self.job_role_table.is_editing() or self.expense_sub_item_table.table.state() == QAbstractItemView.State.EditingState:
             QMessageBox.information(
                 self,
@@ -501,7 +532,7 @@ class MainWindow(QWidget):
                 result = calculate_result(scenario_id, conn, overhead_rate=overhead_rate, profit_rate=profit_rate)
             finally:
                 conn.close()
-            self._refresh_master_data(scenario_id)
+            self._refresh_master_data(scenario_id, skip_expense_reload=True)
             aggregator = result["aggregator"]
             self.summary_panel.update_summary(aggregator, pdf_grand_total=0)
             self.labor_detail.update_rows(result["labor_rows"])
@@ -541,16 +572,15 @@ class MainWindow(QWidget):
             return ok and bool(sid)
 
         def on_success(snapshot: "ResultSnapshot") -> None:
+            # 예약된 노무비 자동계산이 집계 결과를 덮어쓰지 않도록 타이머 중단
+            self._job_role_debounce_timer.stop()
             self.last_scenario_name = self._ctx.scenario_name
             self.last_scenario_id = self._ctx.scenario_id
+            self._set_dirty(False)
             self.job_role_table.dirty = False
             self.expense_sub_item_table.dirty = False
-            self._refresh_master_data(self._ctx.scenario_id)
-            conn = get_connection()
-            try:
-                self._canonical_at_aggregation = get_scenario_input(self._ctx.scenario_id, conn)
-            finally:
-                conn.close()
+
+            # 집계 결과를 먼저 저장 (경비상세 탭 전환 시 사용)
             agg = snapshot.to_dict()["aggregator"]
             self.last_aggregator = Aggregator(
                 labor_total=agg["labor_total"],
@@ -562,6 +592,16 @@ class MainWindow(QWidget):
             )
             self.last_labor_rows = snapshot.labor_rows
             self.last_expense_rows = snapshot.expense_rows
+
+            # 마스터 데이터 새로고침 (경비입력 탭 보험 7종만 갱신, 사용자 편집 보존)
+            self._refresh_master_data(self._ctx.scenario_id, skip_expense_reload=True)
+            conn = get_connection()
+            try:
+                self._canonical_at_aggregation = get_scenario_input(self._ctx.scenario_id, conn)
+            finally:
+                conn.close()
+
+            # UI 업데이트: 요약, 노무비 상세, 경비 상세
             self.summary_panel.update_summary(self.last_aggregator, pdf_grand_total=0)
             self.labor_detail.update_rows(snapshot.labor_rows)
             total_headcount = sum(
@@ -593,6 +633,8 @@ class MainWindow(QWidget):
 
     def _save_scenario_impl(self):
         """시나리오별 저장: 집계 실행 후 저장 시 해당 시점의 입력·스냅샷으로 저장. 그 외에는 현재 UI 반영."""
+        # 예약된 노무비 자동계산이 저장 데이터를 덮어쓰지 않도록 타이머 중단
+        self._job_role_debounce_timer.stop()
         scenario_name_raw = (self.input_panel.get_values().get("scenario_name") or "").strip()
         scenario_name = (scenario_name_raw or "default").strip()
         scenario_id = self._sanitize_filename(scenario_name_raw or "default")
@@ -633,6 +675,18 @@ class MainWindow(QWidget):
                         "headcount": vals.get("headcount", 0),
                     })
                 save_json(str(self.scenario_dir / f"{scenario_id}_job_roles.json"), job_roles_json)
+                # 경비 세부항목도 DB에 저장 (집계 후에도 사용자 편집값 반영)
+                commit_table_edit(self.expense_sub_item_table.table)
+                total_headcount = sum(
+                    v.get("headcount", 0) for v in self.job_role_table.get_job_inputs().values()
+                )
+                all_sub = self.expense_sub_item_table.get_all_sub_items(total_headcount=total_headcount)
+                logging.info("[저장-집계] 경비 세부항목 %d개 코드 저장 시작", len(all_sub))
+                for exp_code, sub_list in all_sub.items():
+                    for si in sub_list:
+                        logging.info("[저장-집계] %s: sub=%s qty=%s price=%s amount=%s",
+                                     exp_code, si.get("sub_code"), si.get("quantity"), si.get("unit_price"), si.get("amount"))
+                    repo.upsert_expense_sub_items(scenario_id, exp_code, sub_list)
             except ScenarioInputValidationError as exc:
                 self._show_validation_errors(exc.errors)
                 return
@@ -673,12 +727,12 @@ class MainWindow(QWidget):
             self.job_role_table.table.blockSignals(False)
 
         if snapshot_saved:
-            QMessageBox.information(self, "저장 완료", "시나리오가 저장되었습니다.")
+            QMessageBox.information(self, "저장 완료", "시나리오(직무·경비·집계 결과)가 저장되었습니다.")
         else:
             QMessageBox.information(
                 self,
                 "저장 완료",
-                "시나리오 입력이 저장되었습니다.\n집계 결과를 반영하려면 '집계 실행' 후 다시 저장하세요.",
+                "시나리오 입력(직무·경비)이 저장되었습니다.\n집계 결과를 반영하려면 '집계 실행' 후 다시 저장하세요.",
             )
 
     def save_scenario_as(self):
@@ -892,6 +946,8 @@ class MainWindow(QWidget):
 
     def _persist_ui_to_db(self):
         """현재 UI 입력을 DB에 반영. 성공 시 (True, scenario_id, scenario_name), 실패 시 (False, None, None)."""
+        # 예약된 노무비 자동계산이 저장할 데이터를 덮어쓰지 않도록 타이머 중단
+        self._job_role_debounce_timer.stop()
         commit_table_edit(self.job_role_table.table)
         commit_table_edit(self.expense_sub_item_table.table)
         values = self.input_panel.get_values()
@@ -929,9 +985,45 @@ class MainWindow(QWidget):
             logging.info("[저장] 직무 테이블 행=%d, UI 직무입력=%d건", table_rows, len(job_inputs))
             if len(job_inputs) > 0:
                 logging.info("[저장] 직무입력 샘플: %s", list(job_inputs.items())[:2])
+            # 경비 탭: 저장 대상이 현재 불러온 시나리오면 메모리 전체 저장; 아니면 DB 기준으로 현재 경비코드만 반영
+            commit_table_edit(self.expense_sub_item_table.table)
+            total_headcount = sum(
+                v.get("headcount", 0) for v in job_inputs.values()
+            ) or 1
+            est = self.expense_sub_item_table
+            est._total_headcount = max(int(total_headcount), 1)
+            est._save_table_to_current_exp()
+
+            if getattr(self, "last_scenario_id", None) == scenario_id:
+                # 방금 불러온 시나리오와 동일 → 수정한 모든 경비코드 반영
+                all_sub = est.get_all_sub_items(total_headcount=total_headcount)
+            else:
+                # 다른 시나리오 또는 한 번도 불러오지 않음 → DB에 있던 값 유지, 메모리에 있는 모든 경비코드 반영
+                existing_raw = repo.get_expense_sub_items(scenario_id)
+                existing_by_exp = {}
+                for si in existing_raw:
+                    existing_by_exp.setdefault(si.exp_code, []).append(_sub_item_to_dict(si))
+                if existing_by_exp:
+                    # 메모리에 있는 모든 경비코드의 수정사항을 DB 데이터 위에 덮어쓰기
+                    for mem_code, mem_items in est._sub_items_by_exp.items():
+                        if mem_code not in EXP_CODES_FROM_LABOR and mem_items:
+                            existing_by_exp[mem_code] = list(mem_items)
+                    all_sub = {k: v for k, v in existing_by_exp.items() if k not in EXP_CODES_FROM_LABOR}
+                else:
+                    all_sub = est.get_all_sub_items(total_headcount=total_headcount)
+
+            expense_inputs = {}
+            for exp_code, sub_list in all_sub.items():
+                if not sub_list:
+                    continue
+                total_qty = sum(float(si.get("quantity", 0) or 0) for si in sub_list)
+                total_amt = sum(int(si.get("amount", 0) or 0) for si in sub_list)
+                unit_price = int(total_amt / total_qty) if total_qty else 0
+                expense_inputs[exp_code] = {"quantity": total_qty, "unit_price": unit_price}
+            logging.info("[저장] 경비 입력 %d개 코드 canonical 반영 (기준: DB 병합)", len(expense_inputs))
             ui_data = {
                 "job_inputs": job_inputs,
-                "expense_inputs": {},
+                "expense_inputs": expense_inputs,
             }
             input_values = self.input_panel.get_values()
             overhead_rate = input_values.get("overhead_rate", 0.0)
@@ -952,14 +1044,15 @@ class MainWindow(QWidget):
                 holiday_work_days_calc=holiday_calc,
             )
             payload["_display_name"] = scenario_name  # 재실행 후 목록/불러오기 시 표시명 복원용
-            logging.info("[저장] canonical 직무수: %d건", len(payload.get("labor", {}).get("job_roles", {})))
+            logging.info("[저장] canonical 직무수: %d건, 경비: %d건",
+                        len(payload.get("labor", {}).get("job_roles", {})),
+                        len(payload.get("expenses", {}).get("items", {})))
             post_scenario_input(payload, scenario_id, conn)
-            commit_table_edit(self.expense_sub_item_table.table)
-            total_headcount = sum(
-                v.get("headcount", 0) for v in self.job_role_table.get_job_inputs().values()
-            )
-            all_sub = self.expense_sub_item_table.get_all_sub_items(total_headcount=total_headcount)
+            logging.info("[저장-직접] 경비 세부항목 %d개 코드 DB 저장 시작", len(all_sub))
             for exp_code, sub_list in all_sub.items():
+                for si in sub_list:
+                    logging.info("[저장-직접] %s: sub=%s qty=%s price=%s amount=%s",
+                                 exp_code, si.get("sub_code"), si.get("quantity"), si.get("unit_price"), si.get("amount"))
                 repo.upsert_expense_sub_items(scenario_id, exp_code, sub_list)
             return True, scenario_id, scenario_name
         except ScenarioInputValidationError as exc:
@@ -968,14 +1061,16 @@ class MainWindow(QWidget):
         finally:
             conn.close()
 
-    def _save_current_expense_only(self) -> None:
-        """경비입력 탭에서 선택한 경비코드의 세부 항목만 DB에 저장. 집계 실행과 별개."""
+    def _save_current_expense_only(self, *, silent: bool = False) -> None:
+        """경비입력 탭에서 선택한 경비코드의 세부 항목만 DB에 저장. 집계 실행과 별개.
+        silent=True: 수량/단가 자동 저장 시 사용. 조건 미충족·실패 시 메시지 박스 없이 반환."""
         commit_table_edit(self.expense_sub_item_table.table)
         values = self.input_panel.get_values()
         scenario_name = values.get("scenario_name") or "default"
         scenario_id = self._sanitize_filename(scenario_name)
         if not scenario_id:
-            QMessageBox.information(self, "저장", "시나리오명을 입력하세요.")
+            if not silent:
+                QMessageBox.information(self, "저장", "시나리오명을 입력하세요.")
             return
         total_headcount = sum(
             v.get("headcount", 0) for v in self.job_role_table.get_job_inputs().values()
@@ -984,9 +1079,10 @@ class MainWindow(QWidget):
             total_headcount=max(total_headcount, 1)
         )
         if not exp_code:
-            QMessageBox.information(
-                self, "저장", "저장할 경비코드를 선택한 뒤 '경비코드 선택'을 눌러 표시하고 저장하세요."
-            )
+            if not silent:
+                QMessageBox.information(
+                    self, "저장", "저장할 경비코드를 선택한 뒤 '경비코드 선택'을 눌러 표시하고 저장하세요."
+                )
             return
         try:
             conn = get_connection()
@@ -996,10 +1092,12 @@ class MainWindow(QWidget):
                 repo.upsert_expense_sub_items(scenario_id, exp_code, sub_list)
             finally:
                 conn.close()
-            self.status_bar.showMessage(f"경비코드 '{exp_code}' 저장됨 (해당 항목만 반영)")
+            if not silent:
+                self.status_bar.showMessage(f"경비코드 '{exp_code}' 저장됨 (해당 항목만 반영)")
         except Exception as exc:
             logging.exception("경비코드 저장 오류")
-            QMessageBox.critical(self, "저장 실패", f"경비코드 저장 중 오류가 발생했습니다.\n{exc}")
+            if not silent:
+                QMessageBox.critical(self, "저장 실패", f"경비코드 저장 중 오류가 발생했습니다.\n{exc}")
 
     def _fetch_default_expense_sub_items(self, exp_code: str):
         """경비코드 선택 시 해당 코드의 기본 세부 항목을 default 시나리오에서 불러온다. (exp_code별 세부 항목·단가 등)"""
@@ -1011,7 +1109,7 @@ class MainWindow(QWidget):
         finally:
             conn.close()
 
-    def _refresh_master_data(self, scenario_id: str) -> None:
+    def _refresh_master_data(self, scenario_id: str, skip_expense_reload: bool = False) -> None:
         if self.job_role_table.is_editing() or self.expense_sub_item_table.table.state() == QAbstractItemView.State.EditingState:
             logging.warning("[새로고침] 편집 중/더티 상태라 생략")
             return
@@ -1052,21 +1150,40 @@ class MainWindow(QWidget):
                     }
                     for i in items
                 ]
-                snapshot = get_result_snapshot(scenario_id, conn)
-                labor_insurance = (snapshot.get("insurance_by_exp_code") or {}) if snapshot else None
-                if not labor_insurance:
-                    labor_insurance = get_insurance_by_exp_code_for_scenario(scenario_id, conn)
-                sub_items_by_exp = build_sub_items_by_exp(
-                    repo, scenario_id,
-                    labor_insurance_by_exp_code=labor_insurance or None,
-                    expense_items=expense_items_for_sub,
-                )
-                total_headcount = sum(
-                    v.get("headcount", 0) for v in self.job_role_table.get_job_inputs().values()
-                )
-                self.expense_sub_item_table.load_sub_items(
-                    sub_items_by_exp, expense_items_for_sub, total_headcount=total_headcount
-                )
+                if skip_expense_reload:
+                    # 집계 직후: 사용자 편집 보존, 보험 7종만 갱신
+                    snapshot = get_result_snapshot(scenario_id, conn)
+                    labor_insurance = (snapshot.get("insurance_by_exp_code") or {}) if snapshot else None
+                    if not labor_insurance:
+                        labor_insurance = get_insurance_by_exp_code_for_scenario(scenario_id, conn)
+                    if labor_insurance:
+                        item_map = {
+                            i["exp_code"]: i.get("exp_name", i["exp_code"])
+                            for i in expense_items_for_sub
+                        }
+                        from src.ui.expense_sub_item_table import _labor_insurance_row
+                        for exp_code in EXP_CODES_FROM_LABOR:
+                            amount = labor_insurance.get(exp_code, 0) or 0
+                            self.expense_sub_item_table._sub_items_by_exp[exp_code] = [
+                                _labor_insurance_row(exp_code, item_map.get(exp_code, exp_code), int(amount))
+                            ]
+                    logging.info("[새로고침] 집계 후 경비입력 테이블 리로드 생략 (사용자 편집 보존)")
+                else:
+                    snapshot = get_result_snapshot(scenario_id, conn)
+                    labor_insurance = (snapshot.get("insurance_by_exp_code") or {}) if snapshot else None
+                    if not labor_insurance:
+                        labor_insurance = get_insurance_by_exp_code_for_scenario(scenario_id, conn)
+                    sub_items_by_exp = build_sub_items_by_exp(
+                        repo, scenario_id,
+                        labor_insurance_by_exp_code=labor_insurance or None,
+                        expense_items=expense_items_for_sub,
+                    )
+                    total_headcount = sum(
+                        v.get("headcount", 0) for v in self.job_role_table.get_job_inputs().values()
+                    )
+                    self.expense_sub_item_table.load_sub_items(
+                        sub_items_by_exp, expense_items_for_sub, total_headcount=total_headcount
+                    )
             finally:
                 self.job_role_table.table.blockSignals(False)
         finally:
@@ -1231,6 +1348,49 @@ class MainWindow(QWidget):
         wb.save(file_path)
         QMessageBox.information(self, "내보내기", "Excel 저장이 완료되었습니다.")
 
+    def _export_full_excel(self):
+        """auto_fm_fin.xlsx 양식으로 전체 Excel 내보내기."""
+        snapshot = get_result_snapshot(self.last_scenario_id)
+        if snapshot is None:
+            QMessageBox.information(self, "내보내기", "계산 결과가 없습니다. 먼저 집계를 실행하세요.")
+            return
+
+        try:
+            from src.domain.export.excel_exporter import ExcelExporter
+        except ImportError:
+            QMessageBox.warning(self, "내보내기 실패", "export 모듈을 로드할 수 없습니다.")
+            return
+
+        template_path = Path(__file__).resolve().parents[1] / "auto_fm_fin.xlsx"
+        if not template_path.exists():
+            QMessageBox.warning(self, "내보내기 실패", f"템플릿 파일을 찾을 수 없습니다:\n{template_path}")
+            return
+
+        input_values = self.input_panel.get_values()
+        overhead_rate = input_values.get("overhead_rate", 9.0)
+        profit_rate = input_values.get("profit_rate", 10.0)
+
+        safe_name = self._sanitize_filename(self.last_scenario_name)
+        default_path = self.scenario_dir / f"{safe_name}_용역원가.xlsx"
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "양식 Excel 내보내기", str(default_path), "Excel Files (*.xlsx)",
+        )
+        if not file_path:
+            return
+
+        try:
+            exporter = ExcelExporter(
+                template_path=template_path,
+                snapshot=snapshot,
+                overhead_rate=overhead_rate,
+                profit_rate=profit_rate,
+            )
+            exporter.export(Path(file_path))
+            QMessageBox.information(self, "내보내기", f"양식 Excel 저장이 완료되었습니다.\n{file_path}")
+        except Exception as e:
+            logging.getLogger(__name__).error("양식 Excel 내보내기 실패: %s", e, exc_info=True)
+            QMessageBox.warning(self, "내보내기 실패", f"Excel 내보내기 중 오류 발생:\n{e}")
+
     def _export_detail_pdf(self, file_path: str, snapshot: dict) -> None:
         if not file_path:
             return
@@ -1305,10 +1465,10 @@ class MainWindow(QWidget):
                     "annual_holiday_work_days": hw_calc.get("annual_holiday_work_days", 0),
                 })
                 self._sync_holiday_headcount()
+            # 불러오기 후 직무 테이블 편집 가능 상태 명시 복원 (시그널 블록 안에서 실행)
+            self.job_role_table._force_editable()
         finally:
             self.job_role_table.table.blockSignals(False)
-            # 불러오기 후 직무 테이블 편집 가능 상태 명시 복원
-            self.job_role_table._force_editable()
 
     def _sync_holiday_headcount(self) -> None:
         """직무별 인원에서 관리소장을 제외한 인원을 계산해 휴일근무일수 패널에 반영."""
@@ -1335,6 +1495,68 @@ class MainWindow(QWidget):
     def _clear_restoring_snapshot(self) -> None:
         """불러오기 후 일정 시간이 지나면 플래그 해제 (이후 사용자 편집 시 자동계산 정상 동작)."""
         self._restoring_snapshot = False
+
+    def _debounce_expense_detail_refresh(self) -> None:
+        """경비입력 수량/단가 셀 변경 시 디바운스 후 경비상세 자동 재계산."""
+        self._expense_detail_debounce_timer.stop()
+        self._expense_detail_debounce_timer.start(400)
+
+    def _on_expense_quantity_or_price_changed(self) -> None:
+        """디바운스 타임아웃: 테이블 → 메모리 반영, 경비상세 재계산, 현재 경비코드 DB 자동 저장."""
+        logging.info("[경비입력→경비상세] 수량/단가 변경 감지 → 경비상세 자동 재계산 시작")
+        commit_table_edit(self.expense_sub_item_table.table)
+        total_headcount = sum(
+            v.get("headcount", 0) for v in self.job_role_table.get_job_inputs().values()
+        ) or 1
+        self.expense_sub_item_table._total_headcount = max(int(total_headcount), 1)
+        self.expense_sub_item_table._save_table_to_current_exp()
+        self._refresh_expense_detail_from_input()
+        self._save_current_expense_only(silent=True)
+        logging.info("[경비입력→경비상세] 경비상세 자동 재계산 완료")
+
+    def _on_expense_edit_applied(self) -> None:
+        """경비입력 수정 버튼 클릭 시: 상태 메시지 + 경비상세 탭 재계산."""
+        self.status_bar.showMessage(
+            "선택한 경비코드 수정 내용이 반영되었습니다. '시나리오 저장'을 누르면 저장됩니다.", 4000
+        )
+        self._refresh_expense_detail_from_input()
+
+    def _refresh_expense_detail_from_input(self) -> None:
+        """현재 경비입력(_sub_items_by_exp) 기준으로 경비상세 탭만 재계산해 갱신. DB/직무 변경 없음."""
+        commit_table_edit(self.expense_sub_item_table.table)
+        values = self.input_panel.get_values()
+        scenario_name = (values.get("scenario_name") or "").strip() or "default"
+        scenario_id = self._sanitize_filename(scenario_name)
+        if not scenario_id:
+            scenario_id = "default"
+        est = self.expense_sub_item_table
+        if not est._sub_items_by_exp:
+            return
+        try:
+            conn = get_connection()
+            try:
+                job_inputs = self.job_role_table.get_job_inputs()
+                year_values = self.base_year_panel.get_values()
+                wage_year = year_values.get("wage_year")
+                labor_rows = get_labor_rows_from_ui(
+                    job_inputs, scenario_id, conn, wage_year=wage_year
+                )
+                labor_total = sum(
+                    int(r.get("role_total", 0)) for r in labor_rows if isinstance(r, dict)
+                )
+                expense_rows = get_expense_rows_for_display(
+                    scenario_id, conn, est._sub_items_by_exp, labor_total
+                )
+                total_headcount = sum(
+                    v.get("headcount", 0) for v in job_inputs.values()
+                ) or 1
+                self.last_expense_rows = expense_rows
+                self.expense_detail.update_rows(expense_rows, total_headcount=total_headcount)
+                self.expense_detail.update()
+            finally:
+                conn.close()
+        except Exception as exc:
+            logging.exception("경비상세 재계산 중 오류: %s", exc)
 
     def _do_job_role_changed(self):
         """직무별 인원 입력이 변경되면 보험료를 자동 계산하여 경비입력에 반영. DB 반영 없이 현재 UI 기준으로만 계산."""
@@ -1408,26 +1630,46 @@ class MainWindow(QWidget):
                     for i in items
                 ]
 
-                # 보험료를 포함한 세부 항목 재구성
+                # 총 인원 수 계산
+                total_headcount = sum(
+                    v.get("headcount", 0) for v in job_inputs.values()
+                )
+
+                # 사용자 편집 중인 비보험 항목 보존: 보험 7종만 DB 재계산으로 갱신
+                est = self.expense_sub_item_table
+
+                # 현재 테이블 편집 내용을 먼저 in-memory에 저장
+                commit_table_edit(est.table)
+                est._save_table_to_current_exp()
+                user_edits = dict(est._sub_items_by_exp)
+
+                # DB에서 세부 항목 재구성 (보험 7종 포함)
                 sub_items_by_exp = build_sub_items_by_exp(
                     repo, scenario_id,
                     labor_insurance_by_exp_code=labor_insurance,
                     expense_items=expense_items_for_sub,
                 )
 
-                # 총 인원 수 계산
-                total_headcount = sum(
-                    v.get("headcount", 0) for v in job_inputs.values()
-                )
+                # 사용자 편집 병합: 비보험 코드는 사용자 편집값 유지
+                for code, items in user_edits.items():
+                    if code not in EXP_CODES_FROM_LABOR and items:
+                        sub_items_by_exp[code] = items
 
-                # 경비입력 테이블 갱신 (시그널 블록하여 중복 dirty 방지)
-                self.expense_sub_item_table.table.blockSignals(True)
-                try:
-                    self.expense_sub_item_table.load_sub_items(
-                        sub_items_by_exp, expense_items_for_sub, total_headcount=total_headcount
-                    )
-                finally:
-                    self.expense_sub_item_table.table.blockSignals(False)
+                # 경비입력 탭이 보일 때만 테이블 UI 갱신, 아닐 때도 in-memory 데이터는 업데이트
+                if self.tabs.currentIndex() == self.tabs.indexOf(self.expense_sub_item_table):
+                    est.table.blockSignals(True)
+                    try:
+                        est.load_sub_items(
+                            sub_items_by_exp, expense_items_for_sub, total_headcount=total_headcount
+                        )
+                    finally:
+                        est.table.blockSignals(False)
+                else:
+                    # 다른 탭에 있을 때: in-memory 데이터만 갱신 (보험 7종 반영 + 사용자 편집 보존)
+                    est._sub_items_by_exp = {
+                        exp_code: [_sub_item_to_dict(si) for si in items]
+                        for exp_code, items in sub_items_by_exp.items()
+                    }
 
                 # 경비 상세에도 보험 7종 포함해 반영
                 expense_rows = get_expense_rows_for_display(
@@ -1477,12 +1719,14 @@ class MainWindow(QWidget):
             self.calculate_button.setEnabled(not_editing)
             self.export_pdf_button.setEnabled(has_snapshot)
             self.export_excel_button.setEnabled(has_snapshot)
+            self.export_full_excel_button.setEnabled(has_snapshot)
         else:
             state = compute_action_state(self._dirty, self.last_aggregator is not None)
             self.save_button.setEnabled(state["save_enabled"])
             self.calculate_button.setEnabled(state["calculate_enabled"])
             self.export_pdf_button.setEnabled(state["export_enabled"])
             self.export_excel_button.setEnabled(state["export_enabled"])
+            self.export_full_excel_button.setEnabled(state["export_enabled"])
 
     def _show_validation_errors(self, errors):
         lines = [f"{e.field_path}: {e.message}" for e in errors]

@@ -12,7 +12,8 @@ class LaborJobLine:
     overtime: int
     total: int
     base_salary: int
+    bonus: int
     allowances: int
-    insurance_total: int
+    retirement: int
     labor_subtotal: int
     role_total: int

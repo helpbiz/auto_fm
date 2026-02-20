@@ -87,6 +87,19 @@ def copy_masterdata(conn: sqlite3.Connection, from_scenario_id: str, to_scenario
         """,
         (to_scenario_id, from_scenario_id),
     )
+    # 경비 세부 항목 복사
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO md_expense_sub_item
+          (scenario_id, exp_code, sub_code, sub_name, spec, unit,
+           quantity, unit_price, amount, remark, sort_order, is_active)
+        SELECT ?, exp_code, sub_code, sub_name, spec, unit,
+               quantity, unit_price, amount, remark, sort_order, is_active
+        FROM md_expense_sub_item
+        WHERE scenario_id=?
+        """,
+        (to_scenario_id, from_scenario_id),
+    )
 
 
 def choose_base_scenario(conn: sqlite3.Connection) -> str | None:

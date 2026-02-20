@@ -1,0 +1,9 @@
+{
+  "고급기술자":     {"govt_daily": 305410, "md_basic": 158731},
+  "중급기술자":     {"govt_daily": 258210, "md_basic": 134199},
+  "초급기술자":     {"govt_daily": 225110, "md_basic": 116999},
+  "고급숙련기술자": {"govt_daily": 246010, "md_basic": 127863},
+  "중급숙련기술자": {"govt_daily": 219560, "md_basic": 114118},
+  "초급숙련기술자": {"govt_daily": 192210, "md_basic": 99897},
+  "단순노무종사원": {"govt_daily": 89210,  "md_basic": 89210}
+}

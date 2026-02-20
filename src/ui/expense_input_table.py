@@ -29,6 +29,7 @@ def setup_qtable_debug_log(log_path: str) -> str:
             level=logging.DEBUG,
             format="%(asctime)s.%(msecs)03d [%(levelname)s] %(message)s",
             datefmt="%Y-%m-%d %H:%M:%S",
+            encoding="utf-8",
         )
         _LOG_READY = True
     return log_path
@@ -158,8 +159,8 @@ def hook_suspicious_methods(table: QTableWidget, name: str = "qtable") -> None:
     def set_edit_triggers_hook(val):
         v_int = _to_int_safe(val)
         v_repr = repr(val)
-        logging.warning(
-            f"{name}.setEditTriggers(val={v_repr}, int={v_int}) called!"
+        logging.debug(
+            "%s.setEditTriggers(val=%s, int=%s) called!", name, v_repr, v_int
         )
         return orig_set_edit_triggers(val)
 
@@ -228,6 +229,13 @@ class ExpenseInputTable(QWidget):
     """
     경비 입력 테이블 (표준 단가 읽기 전용)
     """
+    # 클래스 상수로 플래그 정의
+    EDITABLE_FLAGS = (
+        Qt.ItemFlag.ItemIsSelectable
+        | Qt.ItemFlag.ItemIsEnabled
+        | Qt.ItemFlag.ItemIsEditable
+    )
+    READONLY_FLAGS = Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled
 
     def __init__(self):
         super().__init__()
@@ -241,13 +249,6 @@ class ExpenseInputTable(QWidget):
         title = QLabel("경비 입력")
         title.setStyleSheet("font-weight: bold;")
         layout.addWidget(title)
-
-        editable_flags = (
-            Qt.ItemFlag.ItemIsSelectable
-            | Qt.ItemFlag.ItemIsEnabled
-            | Qt.ItemFlag.ItemIsEditable
-        )
-        readonly_flags = Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled
 
         self.table = QTableWidget(0, 6)
         class IntegerDelegate(QStyledItemDelegate):
@@ -321,15 +322,15 @@ class ExpenseInputTable(QWidget):
                 unit = price.get("unit", "")
 
                 code_item = QTableWidgetItem(exp_code)
-                code_item.setFlags(readonly_flags)
+                code_item.setFlags(self.READONLY_FLAGS)
                 name_item = QTableWidgetItem(exp_name)
-                name_item.setFlags(readonly_flags)
+                name_item.setFlags(self.READONLY_FLAGS)
                 group_item = QTableWidgetItem(group_code)
-                group_item.setFlags(readonly_flags)
+                group_item.setFlags(self.READONLY_FLAGS)
                 price_item = QTableWidgetItem(str(unit_price))
-                price_item.setFlags(editable_flags)
+                price_item.setFlags(self.EDITABLE_FLAGS)
                 unit_item = QTableWidgetItem(unit)
-                unit_item.setFlags(readonly_flags)
+                unit_item.setFlags(self.READONLY_FLAGS)
 
                 self.table.setItem(row_idx, 0, code_item)
                 self.table.setItem(row_idx, 1, name_item)
@@ -338,7 +339,7 @@ class ExpenseInputTable(QWidget):
                 self.table.setItem(row_idx, 4, unit_item)
 
                 qty_item = QTableWidgetItem("0")
-                qty_item.setFlags(editable_flags)
+                qty_item.setFlags(self.EDITABLE_FLAGS)
                 self.table.setItem(row_idx, 5, qty_item)
 
                 for col in range(self.table.columnCount()):

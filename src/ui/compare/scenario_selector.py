@@ -15,6 +15,7 @@ class ScenarioSelector(QWidget):
 
         self.label = QLabel(label)
         self.combo = QComboBox()
+        self.combo.setMinimumWidth(180)
         self.refresh_button = QPushButton("새로고침")
         self.load_button = QPushButton("불러오기")
 
